@@ -537,13 +537,35 @@ def run_validation_pipeline(
         results.append(validate_record(record, detail_cache[record.cert_num]))
 
     print("[3/3] 비교·판정 및 리포트 저장")
+    output_path = output_path.expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"      → 저장 경로: {output_path}")
     write_report(output_path, results)
+    if not output_path.exists():
+        raise RuntimeError(f"리포트 저장 실패: {output_path}")
+    print(f"      → 저장 완료 ({output_path.stat().st_size:,} bytes)")
     return results
+
+
+def resolve_downloads_dir() -> Path:
+    """macOS/Windows/Linux 공통 Downloads 경로."""
+    home = Path.home()
+    candidates = [
+        home / "Downloads",
+        home / "다운로드",
+    ]
+    for path in candidates:
+        if path.is_dir():
+            return path
+    # 없으면 기본 Downloads 생성
+    default = home / "Downloads"
+    default.mkdir(parents=True, exist_ok=True)
+    return default
 
 
 def default_output_path(input_path: Path) -> Path:
     """기본 결과물 경로: ~/Downloads/{입력파일명}_kc_validation.xlsx"""
-    downloads = Path.home() / "Downloads"
+    downloads = resolve_downloads_dir()
     stem = input_path.stem or "kc_validation"
     return downloads / f"{stem}_kc_validation.xlsx"
 
@@ -573,8 +595,15 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    input_path = Path(args.input).expanduser()
-    output_path = Path(args.output).expanduser() if args.output else default_output_path(input_path)
+    input_path = Path(args.input).expanduser().resolve()
+    output_path = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else default_output_path(input_path).resolve()
+    )
+
+    print(f"입력: {input_path}")
+    print(f"출력: {output_path}")
 
     if not input_path.exists():
         print(f"ERROR: 입력 파일이 없습니다: {input_path}", file=sys.stderr)
@@ -598,7 +627,8 @@ def main() -> int:
         return 1
 
     print_summary(results)
-    print(f"\n리포트 저장: {output_path}")
+    print(f"\n리포트 저장 완료:")
+    print(f"  {output_path}")
     return 0
 
 
