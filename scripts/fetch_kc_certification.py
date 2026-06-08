@@ -8,6 +8,7 @@ SafetyKorea KC 안전인증정보 목록 추출 (Python)
   python scripts/fetch_kc_certification.py --product-name 모니터 --limit 5
   python scripts/fetch_kc_certification.py --limit 10 --json
   python scripts/fetch_kc_certification.py --limit 10 --csv output.csv
+  python scripts/fetch_kc_certification.py --limit 10 --insecure
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import csv
 import html
 import json
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -44,7 +46,28 @@ def strip_tags(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def fetch_html(url: str, *, method: str = "GET", data: Optional[dict] = None) -> str:
+def create_ssl_context(*, insecure: bool = False) -> ssl.SSLContext:
+    if insecure:
+        return ssl._create_unverified_context()
+    return ssl.create_default_context()
+
+
+def ssl_error_hint() -> str:
+    return (
+        "SSL 인증서 검증 실패입니다. macOS에서 Python.org 설치본을 쓰는 경우:\n"
+        "  /Applications/Python 3.x/Install Certificates.command\n"
+        "또는 임시로 SSL 검증을 건너뛸 수 있습니다:\n"
+        "  python3 scripts/fetch_kc_certification.py --limit 10 --insecure"
+    )
+
+
+def fetch_html(
+    url: str,
+    *,
+    method: str = "GET",
+    data: Optional[dict] = None,
+    ssl_context: Optional[ssl.SSLContext] = None,
+) -> str:
     headers = {"User-Agent": USER_AGENT}
     body = None
     if data is not None:
@@ -53,11 +76,14 @@ def fetch_html(url: str, *, method: str = "GET", data: Optional[dict] = None) ->
 
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=20, context=ssl_context) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code}: {url}") from e
     except urllib.error.URLError as e:
+        reason = str(e.reason)
+        if "CERTIFICATE_VERIFY_FAILED" in reason or "certificate verify failed" in reason.lower():
+            raise RuntimeError(f"요청 실패: {e.reason}\n\n{ssl_error_hint()}") from e
         raise RuntimeError(f"요청 실패: {e.reason}") from e
 
 
@@ -114,9 +140,10 @@ def parse_search_list(page_html: str) -> list[KCCertItem]:
     return items
 
 
-def fetch_latest_list(limit: int = 10) -> list[KCCertItem]:
+def fetch_latest_list(limit: int = 10, *, insecure: bool = False) -> list[KCCertItem]:
     """최신 KC 인증 목록 (API 키 불필요)."""
-    html_text = fetch_html(f"{BASE_URL}/release/itemSearch")
+    ssl_context = create_ssl_context(insecure=insecure)
+    html_text = fetch_html(f"{BASE_URL}/release/itemSearch", ssl_context=ssl_context)
     return parse_search_list(html_text)[:limit]
 
 
@@ -129,12 +156,14 @@ def search_certifications(
     importer_name: Optional[str] = None,
     page_no: int = 0,
     limit: int = 10,
+    insecure: bool = False,
 ) -> list[KCCertItem]:
     """조건별 KC 인증 검색."""
     has_query = any([cert_num, product_name, model_name, maker_name, importer_name])
     if not has_query:
-        return fetch_latest_list(limit)
+        return fetch_latest_list(limit, insecure=insecure)
 
+    ssl_context = create_ssl_context(insecure=insecure)
     data: dict[str, str] = {"pageNo": str(page_no)}
     if cert_num:
         data["certNum"] = cert_num.replace(" ", "")
@@ -151,6 +180,7 @@ def search_certifications(
         f"{BASE_URL}/release/certificationsearch",
         method="POST",
         data=data,
+        ssl_context=ssl_context,
     )
     return parse_search_list(html_text)[:limit]
 
@@ -189,6 +219,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=10, help="최대 건수 (기본 10)")
     parser.add_argument("--json", action="store_true", help="JSON 출력")
     parser.add_argument("--csv", metavar="FILE", help="CSV 파일로 저장")
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="SSL 인증서 검증 건너뛰기 (macOS CERTIFICATE_VERIFY_FAILED 시)",
+    )
     return parser
 
 
@@ -205,6 +240,7 @@ def main() -> int:
             importer_name=args.importer_name,
             page_no=args.page,
             limit=args.limit,
+            insecure=args.insecure,
         )
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
