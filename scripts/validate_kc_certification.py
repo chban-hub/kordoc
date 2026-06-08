@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 """
-RCC 추출 데이터의 KC 인증정보 유효성 검증
+RCC 추출 Excel/CSV → SafetyKorea API → VALID/INVALID 검증 파이프라인
 
-입력: CSV/Excel (details 칼럼에 인증번호·제품명·모델명 포함)
-검증: SafetyKorea searchPop API
-출력: VALID / INVALID / MISMATCH / NOT_FOUND CSV 리포트
+[1] RCC DB 쿼리 결과(Excel/CSV) 로드 — details 칼럼 또는 개별 칼럼
+[2] SafetyKorea searchPop API 조회
+[3] 비교·판정 → VALID / INVALID 리포트 저장
 
 사용법:
   python scripts/validate_kc_certification.py \\
-    --input samples/kc_validation_input.csv \\
-    --output reports/kc_validation_report.csv \\
-    --insecure
-
-  python scripts/validate_kc_certification.py \\
     --input data/rcc_items.xlsx \\
-    --output reports/kc_validation_report.csv \\
-    --details-column details
+    --output reports/kc_validation_report.xlsx \\
+    --insecure
 """
 
 from __future__ import annotations
@@ -121,10 +116,18 @@ def has_recall(recall_status: str) -> bool:
     return value not in {"-", "없음", "해당없음", "N", "NO", "none"}
 
 
+def _normalize_row_keys(row: dict[str, str]) -> dict[str, str]:
+    return {str(k).strip(): v for k, v in row.items()}
+
+
 def _pick_from_mapping(data: dict[str, Any], keys: tuple[str, ...]) -> str:
+    normalized = {str(k).strip().lower(): v for k, v in data.items()}
     for key in keys:
         if key in data and data[key] not in (None, ""):
             return str(data[key]).strip()
+        lower = key.lower()
+        if lower in normalized and normalized[lower] not in (None, ""):
+            return str(normalized[lower]).strip()
     return ""
 
 
@@ -219,31 +222,52 @@ def read_excel_rows(path: Path, sheet_name: Optional[str] = None) -> list[dict[s
     return records
 
 
+def extract_row_fields(row: dict[str, str], *, details_column: str = "details") -> dict[str, str]:
+    """details JSON 우선, 없으면 개별 칼럼(인증번호/제품명/모델명)에서 추출."""
+    row = _normalize_row_keys(row)
+    details_raw = row.get(details_column, "")
+    parsed = parse_details(details_raw)
+
+    cert_num = parsed["cert_num"] or _pick_from_mapping(row, CERT_NUM_KEYS)
+    product_name = parsed["product_name"] or _pick_from_mapping(row, PRODUCT_KEYS)
+    model_name = parsed["model_name"] or _pick_from_mapping(row, MODEL_KEYS)
+
+    if cert_num:
+        cert_num = cert_num.strip().upper()
+
+    return {
+        "cert_num": cert_num,
+        "product_name": product_name,
+        "model_name": model_name,
+        "details_raw": details_raw,
+    }
+
+
 def load_input_records(
     path: Path,
     *,
     details_column: str = "details",
+    sheet_name: Optional[str] = None,
 ) -> list[InputCertRecord]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
         rows = read_csv_rows(path)
     elif suffix in {".xlsx", ".xlsm", ".xls"}:
-        rows = read_excel_rows(path)
+        rows = read_excel_rows(path, sheet_name=sheet_name)
     else:
         raise RuntimeError(f"지원하지 않는 입력 형식입니다: {suffix}")
 
     records: list[InputCertRecord] = []
     for index, row in enumerate(rows, start=2):
-        details_raw = row.get(details_column, "")
-        parsed = parse_details(details_raw)
+        fields = extract_row_fields(row, details_column=details_column)
         records.append(
             InputCertRecord(
                 row_number=index,
-                cert_num=parsed["cert_num"],
-                product_name=parsed["product_name"],
-                model_name=parsed["model_name"],
-                details_raw=details_raw,
-                source_row=row,
+                cert_num=fields["cert_num"],
+                product_name=fields["product_name"],
+                model_name=fields["model_name"],
+                details_raw=fields["details_raw"],
+                source_row=_normalize_row_keys(row),
             )
         )
     return records
@@ -340,11 +364,14 @@ def validate_record(
     )
 
 
-def write_report(path: Path, results: list[ValidationResult]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def is_valid_status(status: str) -> bool:
+    return status == VALIDATION_VALID
 
+
+def build_report_rows(results: list[ValidationResult]) -> tuple[list[str], list[dict[str, str]]]:
     base_fields = [
         "row_number",
+        "is_valid",
         "validation_status",
         "validation_message",
         "cert_num_input",
@@ -366,36 +393,98 @@ def write_report(path: Path, results: list[ValidationResult]) -> None:
                 extra_fields.append(key)
 
     fieldnames = base_fields + extra_fields
+    rows: list[dict[str, str]] = []
+
+    for result in results:
+        row = {
+            "row_number": str(result.row_number),
+            "is_valid": "TRUE" if is_valid_status(result.validation_status) else "FALSE",
+            "validation_status": result.validation_status,
+            "validation_message": result.validation_message,
+            "cert_num_input": result.cert_num_input,
+            "product_name_input": result.product_name_input,
+            "model_name_input": result.model_name_input,
+            "cert_num_api": result.cert_num_api,
+            "product_name_api": result.product_name_api,
+            "model_name_api": result.model_name_api,
+            "cert_status_api": result.cert_status_api,
+            "recall_status_api": result.recall_status_api,
+            "cert_date_api": result.cert_date_api,
+            "cert_org_api": result.cert_org_api,
+        }
+        row.update({k: result.source_row.get(k, "") for k in extra_fields})
+        rows.append(row)
+
+    return fieldnames, rows
+
+
+def write_report_csv(path: Path, results: list[ValidationResult]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames, rows = build_report_rows(results)
 
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for result in results:
-            row = {
-                "row_number": result.row_number,
-                "validation_status": result.validation_status,
-                "validation_message": result.validation_message,
-                "cert_num_input": result.cert_num_input,
-                "product_name_input": result.product_name_input,
-                "model_name_input": result.model_name_input,
-                "cert_num_api": result.cert_num_api,
-                "product_name_api": result.product_name_api,
-                "model_name_api": result.model_name_api,
-                "cert_status_api": result.cert_status_api,
-                "recall_status_api": result.recall_status_api,
-                "cert_date_api": result.cert_date_api,
-                "cert_org_api": result.cert_org_api,
-            }
-            row.update({k: result.source_row.get(k, "") for k in extra_fields})
-            writer.writerow(row)
+        writer.writerows(rows)
+
+
+def write_report_xlsx(path: Path, results: list[ValidationResult]) -> None:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+    except ImportError as e:
+        raise RuntimeError(
+            "Excel 리포트 저장을 위해 openpyxl이 필요합니다: pip install openpyxl"
+        ) from e
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames, rows = build_report_rows(results)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "validation_report"
+    ws.append(fieldnames)
+
+    valid_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    invalid_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    header_font = Font(bold=True)
+
+    for col_idx, _ in enumerate(fieldnames, start=1):
+        ws.cell(row=1, column=col_idx).font = header_font
+
+    for row_idx, row in enumerate(rows, start=2):
+        ws.append([row.get(name, "") for name in fieldnames])
+        fill = valid_fill if row.get("is_valid") == "TRUE" else invalid_fill
+        for col_idx in range(1, len(fieldnames) + 1):
+            ws.cell(row=row_idx, column=col_idx).fill = fill
+
+    wb.save(path)
+
+
+def write_report(path: Path, results: list[ValidationResult]) -> None:
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xlsm"}:
+        write_report_xlsx(path, results)
+    else:
+        write_report_csv(path, results)
 
 
 def print_summary(results: list[ValidationResult]) -> None:
     counts: dict[str, int] = {}
+    valid_count = 0
+    invalid_count = 0
     for result in results:
         counts[result.validation_status] = counts.get(result.validation_status, 0) + 1
+        if is_valid_status(result.validation_status):
+            valid_count += 1
+        else:
+            invalid_count += 1
 
     print("\n=== KC 인증 검증 결과 ===")
+    print(f"  VALID:   {valid_count}건")
+    print(f"  INVALID: {invalid_count}건")
+    print(f"  TOTAL:   {len(results)}건")
+    print("\n--- 상세 ---")
     for status in (
         VALIDATION_VALID,
         VALIDATION_MISMATCH,
@@ -405,7 +494,50 @@ def print_summary(results: list[ValidationResult]) -> None:
     ):
         if status in counts:
             print(f"  {status}: {counts[status]}건")
-    print(f"  TOTAL: {len(results)}건")
+
+
+def run_validation_pipeline(
+    input_path: Path,
+    output_path: Path,
+    *,
+    details_column: str = "details",
+    sheet_name: Optional[str] = None,
+    delay: float = 0.3,
+    insecure: bool = False,
+) -> list[ValidationResult]:
+    print("[1/3] RCC Excel/CSV 목록 로드")
+    records = load_input_records(
+        input_path,
+        details_column=details_column,
+        sheet_name=sheet_name,
+    )
+    print(f"      → {len(records)}건 로드 ({input_path.name})")
+
+    print("[2/3] SafetyKorea API 조회 (searchPop)")
+    results: list[ValidationResult] = []
+    detail_cache: dict[str, KCCertDetail] = {}
+
+    for index, record in enumerate(records):
+        if not record.cert_num:
+            results.append(
+                validate_record(record, KCCertDetail("", "", "", "", "", "", "", {}, False))
+            )
+            continue
+
+        if record.cert_num not in detail_cache:
+            detail_cache[record.cert_num] = fetch_cert_detail(
+                record.cert_num,
+                insecure=insecure,
+            )
+            print(f"      → API 조회: {record.cert_num}")
+            if delay > 0 and index < len(records) - 1:
+                time.sleep(delay)
+
+        results.append(validate_record(record, detail_cache[record.cert_num]))
+
+    print("[3/3] 비교·판정 및 리포트 저장")
+    write_report(output_path, results)
+    return results
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -415,6 +547,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", "-i", required=True, help="입력 CSV/Excel 경로")
     parser.add_argument("--output", "-o", required=True, help="검증 결과 CSV 리포트 경로")
     parser.add_argument("--details-column", default="details", help="인증정보 JSON/텍스트 칼럼명")
+    parser.add_argument("--sheet", help="Excel 시트명 (기본: 첫 번째 시트)")
     parser.add_argument("--delay", type=float, default=0.3, help="API 요청 간 대기(초)")
     parser.add_argument(
         "--insecure",
@@ -436,38 +569,22 @@ def main() -> int:
         return 1
 
     try:
-        records = load_input_records(input_path, details_column=args.details_column)
+        results = run_validation_pipeline(
+            input_path,
+            output_path,
+            details_column=args.details_column,
+            sheet_name=args.sheet,
+            delay=args.delay,
+            insecure=args.insecure,
+        )
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
-    if not records:
+    if not results:
         print("ERROR: 입력 데이터가 비어 있습니다.", file=sys.stderr)
         return 1
 
-    results: list[ValidationResult] = []
-    detail_cache: dict[str, KCCertDetail] = {}
-
-    for index, record in enumerate(records):
-        if not record.cert_num:
-            results.append(validate_record(record, KCCertDetail("", "", "", "", "", "", "", {}, False)))
-            continue
-
-        if record.cert_num not in detail_cache:
-            try:
-                detail_cache[record.cert_num] = fetch_cert_detail(
-                    record.cert_num,
-                    insecure=args.insecure,
-                )
-            except RuntimeError as e:
-                print(f"ERROR: {e}", file=sys.stderr)
-                return 1
-            if args.delay > 0 and index < len(records) - 1:
-                time.sleep(args.delay)
-
-        results.append(validate_record(record, detail_cache[record.cert_num]))
-
-    write_report(output_path, results)
     print_summary(results)
     print(f"\n리포트 저장: {output_path}")
     return 0
