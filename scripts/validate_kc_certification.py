@@ -9,8 +9,9 @@ RCC 추출 Excel/CSV → SafetyKorea API → VALID/INVALID 검증 파이프라�
 사용법:
   python scripts/validate_kc_certification.py \\
     --input data/rcc_items.xlsx \\
-    --output reports/kc_validation_report.xlsx \\
     --insecure
+
+  # 결과물 기본 저장 위치: ~/Downloads/kc_validation_report.xlsx
 """
 
 from __future__ import annotations
@@ -540,12 +541,23 @@ def run_validation_pipeline(
     return results
 
 
+def default_output_path(input_path: Path) -> Path:
+    """기본 결과물 경로: ~/Downloads/{입력파일명}_kc_validation.xlsx"""
+    downloads = Path.home() / "Downloads"
+    stem = input_path.stem or "kc_validation"
+    return downloads / f"{stem}_kc_validation.xlsx"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="RCC details 칼럼 기반 KC 인증정보 유효성 검증 (SafetyKorea searchPop API)",
     )
     parser.add_argument("--input", "-i", required=True, help="입력 CSV/Excel 경로")
-    parser.add_argument("--output", "-o", required=True, help="검증 결과 CSV 리포트 경로")
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="검증 결과 리포트 경로 (기본: ~/Downloads/{입력파일명}_kc_validation.xlsx)",
+    )
     parser.add_argument("--details-column", default="details", help="인증정보 JSON/텍스트 칼럼명")
     parser.add_argument("--sheet", help="Excel 시트명 (기본: 첫 번째 시트)")
     parser.add_argument("--delay", type=float, default=0.3, help="API 요청 간 대기(초)")
@@ -561,8 +573,8 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    input_path = Path(args.input)
-    output_path = Path(args.output)
+    input_path = Path(args.input).expanduser()
+    output_path = Path(args.output).expanduser() if args.output else default_output_path(input_path)
 
     if not input_path.exists():
         print(f"ERROR: 입력 파일이 없습니다: {input_path}", file=sys.stderr)
