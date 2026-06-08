@@ -17,13 +17,13 @@ program
   .option("-o, --output <path>", "출력 파일 경로 (단일 파일 시)")
   .option("-d, --out-dir <dir>", "출력 디렉토리 (다중 파일 시)")
   .option("-p, --pages <range>", "페이지/섹션 범위 (예: 1-3, 1,3,5)")
-  .option("--format <type>", "출력 형식: markdown (기본) 또는 json", "markdown")
+  .option("--format <type>", "출력 형식: markdown (기본), json, docx", "markdown")
   .option("--no-header-footer", "PDF 머리글/바닥글 자동 제거")
   .option("--silent", "진행 메시지 숨기기")
   .action(async (files: string[], opts) => {
-    const validFormats = ["markdown", "json"]
+    const validFormats = ["markdown", "json", "docx"]
     if (!validFormats.includes(opts.format)) {
-      process.stderr.write(`[kordoc] 지원하지 않는 형식: ${opts.format} (markdown 또는 json)\n`)
+      process.stderr.write(`[kordoc] 지원하지 않는 형식: ${opts.format} (markdown, json, docx)\n`)
       process.exit(1)
     }
     for (let fi = 0; fi < files.length; fi++) {
@@ -71,9 +71,20 @@ program
         if (opts.outDir && result.images?.length) {
           markdown = markdown.replace(/!\[image\]\(image_/g, "![image](images/image_")
         }
-        const output = opts.format === "json"
-          ? JSON.stringify(result, null, 2)
-          : markdown
+
+        let output: string | Buffer
+        if (opts.format === "json") {
+          output = JSON.stringify(result, null, 2)
+        } else if (opts.format === "docx") {
+          const { blocksToDocx } = await import("./docx/generator.js")
+          const docxBuf = await blocksToDocx(result.blocks, {
+            title: result.metadata?.title,
+            images: result.images,
+          })
+          output = Buffer.from(docxBuf)
+        } else {
+          output = markdown
+        }
 
         // 이미지 저장 (--out-dir 또는 --output 시)
         const saveImages = (dir: string) => {
@@ -87,18 +98,29 @@ program
         }
 
         if (opts.output && files.length === 1) {
-          writeFileSync(opts.output, output, "utf-8")
+          if (opts.format === "docx") {
+            writeFileSync(opts.output, output)
+          } else {
+            writeFileSync(opts.output, output as string, "utf-8")
+          }
           if (!opts.silent) process.stderr.write(`  → ${opts.output}\n`)
           saveImages(resolve(opts.output, ".."))
         } else if (opts.outDir) {
           mkdirSync(opts.outDir, { recursive: true })
-          const outExt = opts.format === "json" ? ".json" : ".md"
+          const outExt = opts.format === "json" ? ".json" : opts.format === "docx" ? ".docx" : ".md"
           const outPath = resolve(opts.outDir, fileName.replace(/\.[^.]+$/, outExt))
-          writeFileSync(outPath, output, "utf-8")
+          if (opts.format === "docx") {
+            writeFileSync(outPath, output)
+          } else {
+            writeFileSync(outPath, output as string, "utf-8")
+          }
           if (!opts.silent) process.stderr.write(`  → ${outPath}\n`)
           saveImages(opts.outDir)
+        } else if (opts.format === "docx") {
+          process.stderr.write("[kordoc] docx 형식은 --output 또는 --out-dir 옵션이 필요합니다.\n")
+          process.exitCode = 1
         } else {
-          process.stdout.write(output + "\n")
+          process.stdout.write(output as string + "\n")
         }
       } catch (err) {
         const { sanitizeError } = await import("./utils.js")

@@ -126,6 +126,8 @@ export async function parseDocx(buffer: ArrayBuffer, options?: ParseOptions): Pr
 export { compare, diffBlocks } from "./diff/compare.js"
 export { extractFormFields } from "./form/recognize.js"
 export { markdownToHwpx } from "./hwpx/generator.js"
+export { blocksToDocx } from "./docx/generator.js"
+export type { DocxGeneratorOptions } from "./docx/generator.js"
 
 // ─── Re-exports ──────────────────────────────────────
 

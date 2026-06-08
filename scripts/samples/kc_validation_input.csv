@@ -1,0 +1,5 @@
+item_id,details
+ITEM-001,"{""cert_num"": ""ZU10040-26007"", ""product_name"": ""모니터(LCD Monitor)"", ""model_name"": ""XG27JCEG""}"
+ITEM-002,"{""cert_num"": ""ZU10040-26007"", ""product_name"": ""모니터(LCD Monitor)"", ""model_name"": ""WRONG-MODEL""}"
+ITEM-003,"{""cert_num"": ""INVALID00-00000"", ""product_name"": ""테스트제품"", ""model_name"": ""TEST-001""}"
+ITEM-004,"{""product_name"": ""모니터"", ""model_name"": ""XG27JCEG""}"
